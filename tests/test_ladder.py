@@ -5,6 +5,7 @@ import pytest
 from fetch_ladder import FetchFailed, FetchTransportError, Raw, RungUnavailable, Session
 
 OK = Raw(200, {}, "<html><body><p>hello</p><a href='/x'>x</a><script>var a=1</script></body></html>")
+HOSTED_OK = Raw(200, {}, "<p>via reader</p>", target_status=200)
 
 
 class Fake:
@@ -35,9 +36,19 @@ class Clock:
         return self.now
 
 
+@pytest.fixture(autouse=True)
+def _home(tmp_path, monkeypatch):
+    monkeypatch.setenv("FETCH_LADDER_HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)  # no git toplevel: the global store only
+
+
+def public(host):
+    return ["93.184.216.34"]
+
+
 def session(transports, **kw):
     clock = Clock()
-    s = Session(transports=transports, sleep=clock.sleep, clock=clock, **kw)
+    s = Session(transports=transports, sleep=clock.sleep, clock=clock, resolve=public, **kw)
     s.test_clock = clock
     return s
 
@@ -45,7 +56,7 @@ def session(transports, **kw):
 BUILT = ("httpx", "urllib", "curl_cffi:chrome")
 
 
-def test_default_rung_is_httpx_and_page_shape():
+def test_unknown_host_tries_httpx_first_and_page_shape():
     f = Fake(OK)
     page = session({"httpx": f}).fetch("https://a.test/p")
     assert page.rung == "httpx" and page.status == 200
@@ -93,7 +104,7 @@ def test_challenge_is_failure_never_text(rung):
 def test_challenge_on_403():
     f = Fake(Raw(403, {}, "Attention Required! | Cloudflare"))
     with pytest.raises(FetchFailed) as e:
-        session({"httpx": f}).fetch("https://a.test/")
+        session({"httpx": f}).fetch("https://a.test/", rung="httpx")
     assert e.value.kind == "challenge" and e.value.status == 403
 
 
@@ -212,17 +223,17 @@ def test_browser_final_url_is_vetted():
 
 # hosted
 @pytest.mark.parametrize("rung", ("hosted:jina", "hosted:firecrawl"))
-def test_hosted_refused_without_flag_and_no_request(rung):
-    f = Fake(OK)
+def test_hosted_refused_when_off_and_no_request(rung):
+    f = Fake(HOSTED_OK)
     with pytest.raises(FetchFailed) as e:
-        session({rung: f}).fetch("https://a.test/", rung=rung)
+        session({rung: f}, allow_hosted=False).fetch("https://a.test/", rung=rung)
     assert e.value.kind == "refused" and not f.calls
 
 
 @pytest.mark.parametrize("rung", ("hosted:jina", "hosted:firecrawl"))
-def test_hosted_runs_with_flag_and_vets_target_only(rung):
-    f = Fake(OK)
-    s = session({rung: f}, allow_hosted=True)
+def test_hosted_runs_by_default_and_vets_target_only(rung):
+    f = Fake(HOSTED_OK)
+    s = session({rung: f})
     assert s.fetch("https://a.test/", rung=rung).rung == rung
     with pytest.raises(FetchFailed) as e:
         s.fetch("https://r.jina.ai/https://a.test/", rung=rung)
@@ -233,7 +244,7 @@ def test_hosted_runs_with_flag_and_vets_target_only(rung):
 def test_hosted_without_key_is_unavailable(rung, var, monkeypatch):
     monkeypatch.delenv(var, raising=False)
     with pytest.raises(RungUnavailable):
-        session({}, allow_hosted=True).fetch("https://a.test/", rung=rung)
+        session({}).fetch("https://a.test/", rung=rung)
 
 
 def test_playwright_not_built():
@@ -249,26 +260,27 @@ def test_climb_stops_at_first_good_body_and_skips_unbuilt(monkeypatch):
     notes = []
     s = session({"httpx": h, "urllib": u, "curl_cffi:chrome": c})
     page = s.climb("https://a.test/", note=notes.append)
-    assert page.rung == "curl_cffi:chrome" and len(h.calls) == len(u.calls) == len(c.calls) == 1
+    assert page.rung == "curl_cffi:chrome" and len(h.calls) == len(c.calls) == 1
+    assert len(u.calls) == 3  # a transport error is retried twice on its rung before the climb moves on
     assert not any("firefox" in n and "request" in n for n in notes)
 
 
-def test_climb_skips_unbuilt_playwright_and_ends_before_hosted_without_flag():
+def test_climb_skips_unbuilt_playwright_and_ends_before_hosted_when_off():
     fs = {r: Fake(Raw(403, {}, "no")) for r in ("httpx", "urllib", "curl_cffi:chrome", "curl_cffi:firefox", "curl_cffi:safari")}
     hosted = Fake(OK)
     fs["hosted:jina"] = hosted
     notes = []
     with pytest.raises(FetchFailed):
-        session(fs).climb("https://a.test/", note=notes.append)
+        session(fs, allow_hosted=False).climb("https://a.test/", note=notes.append)
     assert not hosted.calls
     assert any("playwright" in n and "not built" in n for n in notes)
 
 
-def test_climb_reaches_hosted_with_flag_and_skips_keyless(monkeypatch):
+def test_climb_reaches_hosted_and_skips_keyless(monkeypatch):
     monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
     fs = {r: Fake(Raw(403, {}, "no")) for r in ("httpx", "urllib", "curl_cffi:chrome", "curl_cffi:firefox", "curl_cffi:safari")}
-    fs["hosted:jina"] = Fake(OK)
-    page = session(fs, allow_hosted=True).climb("https://a.test/")
+    fs["hosted:jina"] = Fake(HOSTED_OK)
+    page = session(fs).climb("https://a.test/")
     assert page.rung == "hosted:jina"
 
 
@@ -278,7 +290,7 @@ def test_climb_keyless_hosted_skipped_noted(monkeypatch):
     fs = {r: Fake(Raw(403, {}, "no")) for r in ("httpx", "urllib", "curl_cffi:chrome", "curl_cffi:firefox", "curl_cffi:safari")}
     notes = []
     with pytest.raises(FetchFailed):
-        session(fs, allow_hosted=True).climb("https://a.test/", note=notes.append)
+        session(fs).climb("https://a.test/", note=notes.append)
     assert any("hosted:jina" in n and "unavailable" in n for n in notes)
 
 
@@ -297,7 +309,47 @@ def test_climb_stops_on_vetting_failure():
     assert e.value.kind == "vetting" and not u.calls
 
 
-def test_climb_all_transport_errors_raises_transport_error():
+def test_climb_all_transport_errors_is_exhausted_naming_each_rung():
     fs = {r: Fake(FetchTransportError("down")) for r in ("httpx", "urllib", "curl_cffi:chrome", "curl_cffi:firefox", "curl_cffi:safari")}
-    with pytest.raises(FetchTransportError):
-        session(fs).climb("https://a.test/")
+    with pytest.raises(FetchFailed) as e:
+        session(fs, allow_hosted=False).climb("https://a.test/")
+    assert e.value.kind == "exhausted" and "curl_cffi:safari: down" in str(e.value)
+
+
+# the firecrawl transport's answer mapping (its client answers from a MockTransport; no network)
+def _firecrawl(monkeypatch, handler):
+    import httpx
+
+    from fetch_ladder import transports
+
+    real = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "k")
+    return transports.firecrawl_transport()
+
+
+def test_firecrawl_reports_target_status_and_asks_for_no_cache(monkeypatch):
+    import json
+
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return __import__("httpx").Response(200, json={"data": {"html": "<p>x</p>", "metadata": {"statusCode": 404}}})
+
+    raw = _firecrawl(monkeypatch, handler)("GET", "https://a.test/", None)
+    assert raw.status == 200 and raw.target_status == 404
+    assert sent[0]["maxAge"] == 0 and sent[0]["url"] == "https://a.test/"
+
+
+def test_firecrawl_without_metadata_hides_target_status(monkeypatch):
+    raw = _firecrawl(monkeypatch, lambda r: __import__("httpx").Response(200, json={"data": {"html": "<p>x</p>"}}))(
+        "GET", "https://a.test/", None
+    )
+    assert raw.target_status is None
+
+
+def test_jina_is_unavailable_because_it_hides_target_status(monkeypatch):
+    monkeypatch.setenv("JINA_API_KEY", "k")
+    with pytest.raises(RungUnavailable, match="hides the target status"):
+        session({}).fetch("https://a.test/", rung="hosted:jina")

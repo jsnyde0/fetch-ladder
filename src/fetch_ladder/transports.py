@@ -97,23 +97,8 @@ def _key(var: str, rung: str) -> str:
     return key
 
 
-def jina_transport() -> Transport:
-    key = _key("JINA_API_KEY", "hosted:jina")
-    client = httpx.Client(timeout=TIMEOUT_S)
-
-    def send(method, url, form):
-        if form is not None:
-            raise FetchFailed("hosted:jina reads pages by GET only", "unavailable")
-        try:
-            r = client.get("https://r.jina.ai/" + url, headers={"Authorization": f"Bearer {key}", "X-Return-Format": "html"})
-        except httpx.TransportError as e:
-            raise FetchTransportError(f"{type(e).__name__}: {e}") from e
-        return Raw(r.status_code, _headers(r.headers), r.text)
-
-    return send
-
-
 def firecrawl_transport() -> Transport:
+    """The target's status rides in data.metadata.statusCode; without it the answer is not trusted."""
     key = _key("FIRECRAWL_API_KEY", "hosted:firecrawl")
     client = httpx.Client(timeout=TIMEOUT_S * 2)
 
@@ -123,17 +108,19 @@ def firecrawl_transport() -> Transport:
         try:
             r = client.post(
                 "https://api.firecrawl.dev/v1/scrape", headers={"Authorization": f"Bearer {key}"},
-                json={"url": url, "formats": ["html"]},
+                json={"url": url, "formats": ["html"], "maxAge": 0},  # maxAge 0: never served from its cache
             )  # fmt: skip
         except httpx.TransportError as e:
             raise FetchTransportError(f"{type(e).__name__}: {e}") from e
         if r.status_code != 200:
             return Raw(r.status_code, _headers(r.headers), r.text)
         try:
-            html = r.json()["data"]["html"]
+            data = r.json()["data"]
+            html = data["html"]
         except (ValueError, KeyError, TypeError) as e:
-            raise FetchFailed(f"hosted:firecrawl: unexpected response shape ({e!r})", "status", r.status_code) from e
-        return Raw(200, _headers(r.headers), html)
+            raise FetchFailed(f"hosted:firecrawl: unexpected response shape ({e!r})", "reader") from e
+        status = (data.get("metadata") or {}).get("statusCode")
+        return Raw(200, _headers(r.headers), html, target_status=status if isinstance(status, int) else None)
 
     return send
 
@@ -148,7 +135,9 @@ def build(rung: str) -> Transport:
     if rung == "playwright":
         raise RungUnavailable("playwright: rung not built")
     if rung == "hosted:jina":
-        return jina_transport()
+        # Its answers (HTML or JSON mode) do not carry the target's status, so no answer could be
+        # trusted as a winner; skipped rather than spend a hosted call on a certain failure.
+        raise RungUnavailable("hosted:jina: rung unavailable, its response hides the target status")
     if rung == "hosted:firecrawl":
         return firecrawl_transport()
     raise FetchFailed(f"unknown rung {rung!r}", "unavailable")
