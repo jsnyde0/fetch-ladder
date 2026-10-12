@@ -240,11 +240,10 @@ def test_hosted_runs_by_default_and_vets_target_only(rung):
     assert e.value.kind == "vetting" and len(f.calls) == 1
 
 
-@pytest.mark.parametrize("rung,var", (("hosted:jina", "JINA_API_KEY"), ("hosted:firecrawl", "FIRECRAWL_API_KEY")))
-def test_hosted_without_key_is_unavailable(rung, var, monkeypatch):
-    monkeypatch.delenv(var, raising=False)
+def test_firecrawl_without_key_is_unavailable(monkeypatch):
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
     with pytest.raises(RungUnavailable):
-        session({}).fetch("https://a.test/", rung=rung)
+        session({}).fetch("https://a.test/", rung="hosted:firecrawl")
 
 
 def test_playwright_not_built():
@@ -349,14 +348,17 @@ def test_firecrawl_without_metadata_hides_target_status(monkeypatch):
     assert raw.target_status is None
 
 
-def _jina(monkeypatch, handler):
+def _jina(monkeypatch, handler, key="k"):
     import httpx
 
     from fetch_ladder import transports
 
     real = httpx.Client
     monkeypatch.setattr(httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
-    monkeypatch.setenv("JINA_API_KEY", "k")
+    if key is None:
+        monkeypatch.delenv("JINA_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("JINA_API_KEY", key)
     return transports.jina_transport()
 
 
@@ -374,6 +376,20 @@ def test_jina_reports_target_status_and_asks_for_json_and_no_cache(monkeypatch):
     h = sent[0].headers
     assert str(sent[0].url) == "https://r.jina.ai/https://a.test/p"
     assert h["accept"] == "application/json" and h["x-no-cache"] == "true" and h["authorization"] == "Bearer k"
+
+
+def test_jina_without_key_is_live_and_sends_no_authorization(monkeypatch):
+    import httpx
+
+    sent = []
+
+    def handler(request):
+        sent.append(request)
+        return httpx.Response(200, json={"data": {"content": "x", "httpStatus": 200}})
+
+    send = _jina(monkeypatch, handler, key=None)
+    assert send("GET", "https://a.test/", None).target_status == 200
+    assert "authorization" not in sent[0].headers
 
 
 def test_jina_reports_a_404_target(monkeypatch):
