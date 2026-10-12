@@ -2,7 +2,7 @@
 
 Fetch a URL **by site**: the package remembers, per host, which client (rung) works, climbs to find one for an unknown or newly blocked host, and keeps shared manners — per-host pacing across processes, HTTP 429 wait-out, challenge pages as failures, vetting of every hop, a daily hosted-reader cap.
 
-Rungs, in climb order: `httpx`, `urllib`, `curl_cffi:chrome`, `curl_cffi:firefox`, `curl_cffi:safari`, `playwright` (not built), `hosted:jina` (key `JINA_API_KEY`; JSON mode, target status from `data.httpStatus`), `hosted:firecrawl` (key `FIRECRAWL_API_KEY`).
+Rungs, in climb order: `httpx`, `urllib`, `curl_cffi:chrome`, `curl_cffi:firefox`, `curl_cffi:safari`, `playwright` (not built), `hosted:jina` (key `JINA_API_KEY` optional, keyless has a lower rate limit; JSON mode, target status from `data.httpStatus`), `hosted:firecrawl` (key `FIRECRAWL_API_KEY`).
 
     from fetch_ladder import Session
     page = Session().fetch(url)                  # by site; Page(body, text, final_url, status, links, rung)

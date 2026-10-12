@@ -127,7 +127,7 @@ def firecrawl_transport() -> Transport:
 
 def jina_transport() -> Transport:
     """JSON mode carries the target's status in data.httpStatus; without it the answer is not trusted."""
-    key = _key("JINA_API_KEY", "hosted:jina")
+    key = os.environ.get("JINA_API_KEY", "").strip()  # optional: keyless works at a lower rate limit
     client = httpx.Client(timeout=TIMEOUT_S * 2)
 
     def send(method, url, form):
@@ -136,7 +136,7 @@ def jina_transport() -> Transport:
         try:
             r = client.get(
                 f"https://r.jina.ai/{url}",
-                headers={"Authorization": f"Bearer {key}", "Accept": "application/json", "X-No-Cache": "true"},
+                headers={"Accept": "application/json", "X-No-Cache": "true", **({"Authorization": f"Bearer {key}"} if key else {})},
             )
         except httpx.TransportError as e:
             raise FetchTransportError(f"{type(e).__name__}: {e}") from e

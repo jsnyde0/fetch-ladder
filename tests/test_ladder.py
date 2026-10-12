@@ -287,10 +287,11 @@ def test_climb_keyless_hosted_skipped_noted(monkeypatch):
     monkeypatch.delenv("JINA_API_KEY", raising=False)
     monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
     fs = {r: Fake(Raw(403, {}, "no")) for r in ("httpx", "urllib", "curl_cffi:chrome", "curl_cffi:firefox", "curl_cffi:safari")}
+    fs["hosted:jina"] = Fake(Raw(402, {}, ""))  # keyless jina is live; only firecrawl needs a key
     notes = []
     with pytest.raises(FetchFailed):
         session(fs).climb("https://a.test/", note=notes.append)
-    assert any("hosted:jina" in n and "unavailable" in n for n in notes)
+    assert any("hosted:firecrawl" in n and "unavailable" in n for n in notes)
 
 
 def test_climb_stops_on_429_exhaustion():
