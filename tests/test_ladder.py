@@ -349,7 +349,54 @@ def test_firecrawl_without_metadata_hides_target_status(monkeypatch):
     assert raw.target_status is None
 
 
-def test_jina_is_unavailable_because_it_hides_target_status(monkeypatch):
+def _jina(monkeypatch, handler):
+    import httpx
+
+    from fetch_ladder import transports
+
+    real = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
     monkeypatch.setenv("JINA_API_KEY", "k")
-    with pytest.raises(RungUnavailable, match="hides the target status"):
-        session({}).fetch("https://a.test/", rung="hosted:jina")
+    return transports.jina_transport()
+
+
+def test_jina_reports_target_status_and_asks_for_json_and_no_cache(monkeypatch):
+    import httpx
+
+    sent = []
+
+    def handler(request):
+        sent.append(request)
+        return httpx.Response(200, json={"code": 200, "data": {"content": "# x", "httpStatus": 200}})
+
+    raw = _jina(monkeypatch, handler)("GET", "https://a.test/p", None)
+    assert raw.status == 200 and raw.target_status == 200 and raw.text == "# x"
+    h = sent[0].headers
+    assert str(sent[0].url) == "https://r.jina.ai/https://a.test/p"
+    assert h["accept"] == "application/json" and h["x-no-cache"] == "true" and h["authorization"] == "Bearer k"
+
+
+def test_jina_reports_a_404_target(monkeypatch):
+    import httpx
+
+    raw = _jina(monkeypatch, lambda r: httpx.Response(200, json={"data": {"content": "gone", "httpStatus": 404}}))(
+        "GET", "https://a.test/", None
+    )
+    assert raw.status == 200 and raw.target_status == 404
+
+
+def test_jina_without_http_status_hides_target_status(monkeypatch):
+    import httpx
+
+    raw = _jina(monkeypatch, lambda r: httpx.Response(200, json={"data": {"content": "x"}}))("GET", "https://a.test/", None)
+    assert raw.target_status is None
+
+
+def test_jina_404_target_fails_loud_without_climbing(monkeypatch):
+    import httpx
+
+    fs = {"hosted:jina": _jina(monkeypatch, lambda r: httpx.Response(200, json={"data": {"content": "gone", "httpStatus": 404}}))}
+    fs["hosted:firecrawl"] = Fake(OK)
+    with pytest.raises(FetchFailed):
+        session(fs).fetch("https://a.test/", rung="hosted:jina")
+    assert not fs["hosted:firecrawl"].calls

@@ -125,6 +125,34 @@ def firecrawl_transport() -> Transport:
     return send
 
 
+def jina_transport() -> Transport:
+    """JSON mode carries the target's status in data.httpStatus; without it the answer is not trusted."""
+    key = _key("JINA_API_KEY", "hosted:jina")
+    client = httpx.Client(timeout=TIMEOUT_S * 2)
+
+    def send(method, url, form):
+        if form is not None:
+            raise FetchFailed("hosted:jina reads pages by GET only", "unavailable")
+        try:
+            r = client.get(
+                f"https://r.jina.ai/{url}",
+                headers={"Authorization": f"Bearer {key}", "Accept": "application/json", "X-No-Cache": "true"},
+            )
+        except httpx.TransportError as e:
+            raise FetchTransportError(f"{type(e).__name__}: {e}") from e
+        if r.status_code != 200:
+            return Raw(r.status_code, _headers(r.headers), r.text)
+        try:
+            data = r.json()["data"]
+            content = data["content"]
+        except (ValueError, KeyError, TypeError) as e:
+            raise FetchFailed(f"hosted:jina: unexpected response shape ({e!r})", "reader") from e
+        status = data.get("httpStatus")
+        return Raw(200, _headers(r.headers), content, target_status=status if isinstance(status, int) else None)
+
+    return send
+
+
 def build(rung: str) -> Transport:
     if rung == "httpx":
         return httpx_transport()
@@ -135,9 +163,7 @@ def build(rung: str) -> Transport:
     if rung == "playwright":
         raise RungUnavailable("playwright: rung not built")
     if rung == "hosted:jina":
-        # Its answers (HTML or JSON mode) do not carry the target's status, so no answer could be
-        # trusted as a winner; skipped rather than spend a hosted call on a certain failure.
-        raise RungUnavailable("hosted:jina: rung unavailable, its response hides the target status")
+        return jina_transport()
     if rung == "hosted:firecrawl":
         return firecrawl_transport()
     raise FetchFailed(f"unknown rung {rung!r}", "unavailable")

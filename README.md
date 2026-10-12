@@ -2,7 +2,7 @@
 
 Fetch a URL **by site**: the package remembers, per host, which client (rung) works, climbs to find one for an unknown or newly blocked host, and keeps shared manners — per-host pacing across processes, HTTP 429 wait-out, challenge pages as failures, vetting of every hop, a daily hosted-reader cap.
 
-Rungs, in climb order: `httpx`, `urllib`, `curl_cffi:chrome`, `curl_cffi:firefox`, `curl_cffi:safari`, `playwright` (not built), `hosted:jina` (unavailable: its answers hide the target's status), `hosted:firecrawl` (key `FIRECRAWL_API_KEY`).
+Rungs, in climb order: `httpx`, `urllib`, `curl_cffi:chrome`, `curl_cffi:firefox`, `curl_cffi:safari`, `playwright` (not built), `hosted:jina` (key `JINA_API_KEY`; JSON mode, target status from `data.httpStatus`), `hosted:firecrawl` (key `FIRECRAWL_API_KEY`).
 
     from fetch_ladder import Session
     page = Session().fetch(url)                  # by site; Page(body, text, final_url, status, links, rung)
@@ -37,7 +37,7 @@ Failures raise `FetchFailed` (its `kind` says which) or, on an explicit rung, `F
 - **Cap: 30 hosted calls per UTC day per machine** (`HOSTED_CAP`; `Session(cap=...)`), counted in the day ledger across processes and stores. Cap spent: a fetch whose only remaining rungs are hosted fails loud (`kind="cap"`) and the saved rung stays.
 - A reader's 402 or 429 stops **that reader** for the rest of the day (never the target host); the climb goes on to the next reader.
 - A reader's answer counts only if it exposes the target's status and that status is 2xx; otherwise it fails closed and is never saved.
-- Requests ask the reader not to serve from cache (Firecrawl `maxAge: 0`).
+- Requests ask the reader not to serve from cache (Firecrawl `maxAge: 0`, Jina `X-No-Cache: true`).
 
 ## Credential-shaped links never go to a hosted reader
 
