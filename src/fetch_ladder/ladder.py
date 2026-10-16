@@ -242,14 +242,15 @@ class Session:
             if not _block_shaped(e):
                 raise
             note(f"saved rung {entry['rung']} blocked: {e}")
-            return self.climb(url, form, note, skip=entry["rung"])
+            return self.climb(url, form, note, skip=entry["rung"], tried=[f"{entry['rung']}: {e}"])
 
-    def climb(self, url: str, form: str | None = None, note: Callable[[str], None] = lambda _: None, skip: str | None = None) -> Page:
+    def climb(self, url: str, form: str | None = None, note: Callable[[str], None] = lambda _: None, skip: str | None = None, tried: list[str] | None = None) -> Page:
         """Each rung in CLIMB order until a usable body; the winner is saved. Unbuilt and keyless
         rungs, stopped readers, and hosted rungs for a credential-shaped link or without
         allow_hosted are skipped (said via `note`). A failure that is not block-shaped ends the
-        climb. If every rung fails, FetchFailed (kind exhausted) names each."""
-        tried: list[str] = []
+        climb. If every rung fails, FetchFailed (kind exhausted) names each, the `skip`ped saved rung's
+        own failure (passed in `tried`) first."""
+        tried = list(tried or [])
         dead_local = blocked_local = 0  # local rungs that failed with no HTTP answer / with an answer
         for rung in CLIMB:
             if rung == skip:

@@ -383,3 +383,21 @@ def test_project_store_read_first_then_global_and_writes_go_to_project(tmp_path,
     assert SiteStore(repo / ".fetch-ladder").get("c.test")["rung"] == "httpx"
     assert SiteStore(home).get("c.test") is None
     assert (Ledger(home, DAY).path).exists() and not (repo / ".fetch-ladder" / "ledger").exists()
+
+
+# sb-7wzb.107: a blocked saved rung is part of the exhausted climb's account
+def test_saved_rung_failure_is_named_in_the_exhausted_climb(env, monkeypatch):
+    monkeypatch.delenv("JINA_API_KEY", raising=False)
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    env.store.put("a.test", rung="urllib", won="2026-10-01")
+    fs = blocked_below({"urllib": Fake(Raw(200, {}, "<title>Just a moment...</title>"))})
+    with pytest.raises(FetchFailed) as e:
+        env(fs).fetch("https://a.test/")
+    assert e.value.kind == "exhausted"
+    msg = str(e.value)
+    assert "no rung could run" not in msg
+    assert "bot check" in msg.split("urllib: ", 1)[1].split(";")[0]
+    for rung in LOCAL:
+        assert rung in msg
+    assert msg.index("urllib") < msg.index("httpx")  # saved rung first
+
