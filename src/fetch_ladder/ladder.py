@@ -250,7 +250,7 @@ class Session:
         allow_hosted are skipped (said via `note`). A failure that is not block-shaped ends the
         climb. If every rung fails, FetchFailed (kind exhausted) names each."""
         tried: list[str] = []
-        local_transport_only = True  # every local rung that ran failed with no HTTP answer
+        dead_local = blocked_local = 0  # local rungs that failed with no HTTP answer / with an answer
         for rung in CLIMB:
             if rung == skip:
                 continue
@@ -259,7 +259,7 @@ class Session:
                 if reason:
                     note(f"skip {rung}: {reason}")
                     continue
-                if tried and local_transport_only:  # dead network: a hosted reader cannot help (ADR-008 D4)
+                if dead_local >= 2 and not blocked_local:  # dead network (ADR-008 D4): a hosted reader cannot help
                     raise FetchFailed(f"{url}: network failure on every local rung: " + "; ".join(tried), "network")
             try:
                 page = self._fetch_retrying(url, rung, form, note)
@@ -270,8 +270,11 @@ class Session:
                 if not (_block_shaped(e) or (isinstance(e, FetchFailed) and e.kind in ("reader", "reader_stopped"))):
                     raise
                 note(f"{rung} failed: {e}")
-                if not rung.startswith("hosted:") and not isinstance(e, FetchTransportError):
-                    local_transport_only = False
+                if not rung.startswith("hosted:"):
+                    if isinstance(e, FetchTransportError):
+                        dead_local += 1
+                    else:
+                        blocked_local += 1
                 tried.append(f"{rung}: {e}")
                 continue
             self._save(_host(url), rung)
