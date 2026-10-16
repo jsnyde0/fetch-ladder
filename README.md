@@ -34,7 +34,7 @@ Failures raise `FetchFailed` (its `kind` says which) or, on an explicit rung, `F
 ## Hosted readers
 
 - On by default; `allow_hosted=False` / `--no-hosted` keeps a session local.
-- **Cap: 30 hosted calls per UTC day per machine** (`HOSTED_CAP`; `Session(cap=...)`), counted in the day ledger across processes and stores. Cap spent: a fetch whose only remaining rungs are hosted fails loud (`kind="cap"`) and the saved rung stays.
+- **Cap: 30 hosted calls per UTC day per machine** (`HOSTED_CAP`; `Session(cap=...)`), counted in the day ledger across processes and stores. Cap spent: a fetch whose only remaining rungs are hosted fails loud (`kind="cap"`) and the saved rung stays. **Nightly reserve:** of the 30, the last 20 (`NIGHTLY_RESERVE`) are for `Session(caller="nightly")` alone; the default `caller="adhoc"` gets `kind="cap"` once the day's total reaches 10, so research fetches cannot starve the nightly.
 - A reader's 402 or 429 stops **that reader** for the rest of the day (never the target host); the climb goes on to the next reader.
 - A reader's answer counts only if it exposes the target's status and that status is 2xx; otherwise it fails closed and is never saved.
 - Requests ask the reader not to serve from cache (Firecrawl `maxAge: 0`, Jina `X-No-Cache: true`).

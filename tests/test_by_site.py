@@ -286,7 +286,7 @@ def test_cap_spent_fails_loud_and_keeps_saved_rung(env):
 
 def test_cap_counts_explicit_hosted_calls(env):
     f = Fake(hosted_ok())
-    s = env({"hosted:firecrawl": f}, cap=2)
+    s = env({"hosted:firecrawl": f}, cap=2, nightly_reserve=0)
     s.fetch("https://a.test/1", rung="hosted:firecrawl")
     s.fetch("https://a.test/2", rung="hosted:firecrawl")
     with pytest.raises(FetchFailed) as e:

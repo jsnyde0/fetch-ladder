@@ -2,7 +2,7 @@
 
 import pytest
 
-from fetch_ladder import FetchFailed, FetchTransportError, Raw, RungUnavailable, Session
+from fetch_ladder import HOSTED_CAP, FetchFailed, FetchTransportError, Raw, RungUnavailable, Session
 
 OK = Raw(200, {}, "<html><body><p>hello</p><a href='/x'>x</a><script>var a=1</script></body></html>")
 HOSTED_OK = Raw(200, {}, "<p>via reader</p>", target_status=200)
@@ -455,3 +455,28 @@ def test_hosted_request_that_was_sent_takes_a_cap_slot():
     s = session(fs)
     s.fetch("https://a.test/", rung="hosted:jina")
     assert s.ledger.read()["hosted"] == {"hosted:jina": 1}
+
+
+def test_budget_reserve_stops_adhoc_while_nightly_keeps_slots():
+    ok = Raw(200, {}, "<p>x</p>", target_status=200)
+    adhoc = session({"hosted:jina": Fake(ok)}, cap=5, nightly_reserve=2)
+    nightly = session({"hosted:jina": Fake(ok)}, cap=5, nightly_reserve=2, caller="nightly")
+    for _ in range(3):
+        adhoc.fetch("https://a.test/", rung="hosted:jina")
+    with pytest.raises(FetchFailed) as e:
+        adhoc.fetch("https://a.test/", rung="hosted:jina")
+    assert e.value.kind == "cap"
+    for _ in range(2):  # the nightly takes the reserved slots on the same day ledger
+        nightly.fetch("https://a.test/", rung="hosted:jina")
+    with pytest.raises(FetchFailed) as e:
+        nightly.fetch("https://a.test/", rung="hosted:jina")
+    assert e.value.kind == "cap"
+    assert nightly.ledger.read()["hosted"] == {"hosted:jina": 5}
+
+
+def test_budget_default_reserve_is_20_of_30_and_unknown_caller_is_loud():
+    from fetch_ladder import NIGHTLY_RESERVE
+
+    assert (HOSTED_CAP, NIGHTLY_RESERVE) == (30, 20)
+    with pytest.raises(ValueError):
+        Session(caller="cron")

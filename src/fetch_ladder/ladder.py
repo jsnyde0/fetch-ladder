@@ -38,6 +38,8 @@ CLIMB = (
 )
 GAP_S = 1.0
 HOSTED_CAP = 30  # hosted calls per UTC day per machine (fits Firecrawl's 1000 free a month)
+NIGHTLY_RESERVE = 20  # of HOSTED_CAP: only caller='nightly' may spend these; ad-hoc callers stop at cap - reserve
+CALLERS = ("adhoc", "nightly")
 TRANSPORT_RETRIES = 2  # ADR-008 D4, on the same rung, before a by-site fetch climbs
 RATE_LIMIT_RETRIES = 2
 RATE_LIMIT_PAUSE_S = 30.0
@@ -188,15 +190,20 @@ class Session:
     store. `home`: the global home (store and day ledger); default FETCH_LADDER_HOME or
     ~/.fetch-ladder. `allow_hosted=False` keeps every call on local rungs. `transports` overrides
     rungs by name and `resolve` the address lookup (tests). `clock` is wall time: the ledger
-    shares it across processes. `monotonic` is what a fetch `deadline` is measured on."""
+    shares it across processes. `caller`: 'adhoc' (default) or 'nightly'; of `cap` hosted calls a day,
+    the last `nightly_reserve` are the nightly's alone. `monotonic` is what a fetch `deadline` is measured on."""
 
     def __init__(
-        self, *, allow_hosted=True, gap_s=GAP_S, cap=HOSTED_CAP, store: Path | None = None, home: Path | None = None,
+        self, *, allow_hosted=True, gap_s=GAP_S, cap=HOSTED_CAP, nightly_reserve=NIGHTLY_RESERVE, caller="adhoc", store: Path | None = None, home: Path | None = None,
         transports=None, resolve: Resolve = resolve_host, sleep=time.sleep, clock=time.time, monotonic=time.monotonic,
     ):  # fmt: skip
         self.allow_hosted = allow_hosted
         self.gap_s = gap_s
+        if caller not in CALLERS:
+            raise ValueError(f"caller must be one of {CALLERS}, got {caller!r}")
         self.cap = cap
+        # ad-hoc callers (the default) stop `nightly_reserve` short of the cap; the nightly may spend it all
+        self.limit = cap if caller == "nightly" else max(cap - nightly_reserve, 0)
         self.home = Path(home) if home is not None else stores.home()
         if store is not None:
             self._stores = [stores.SiteStore(store)]
@@ -355,8 +362,8 @@ class Session:
         never the target host; a response that hides the target's status is a failure."""
         if self.ledger.stopped(rung):
             raise FetchFailed(f"{rung}: stopped for the day", "reader_stopped")
-        if not self.ledger.take_hosted(rung, self.cap):
-            raise FetchFailed(f"{rung}: hosted cap of {self.cap} calls today is spent", "cap")
+        if not self.ledger.take_hosted(rung, self.limit):
+            raise FetchFailed(f"{rung}: hosted cap of {self.limit} calls today is spent for this caller", "cap")
         self._pace(_host(url))
         try:
             raw = self._call(transport, "POST" if form is not None else "GET", url, form)
