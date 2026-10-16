@@ -401,3 +401,76 @@ def test_saved_rung_failure_is_named_in_the_exhausted_climb(env, monkeypatch):
         assert rung in msg
     assert msg.index("urllib") < msg.index("httpx")  # saved rung first
 
+
+# sb-7wzb.105: the deadline is an absolute monotonic timestamp
+class Mono:
+    def __init__(self, now=100.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+class Slow(Fake):
+    """A rung that spends `cost` monotonic seconds per call, and records the timeout it was given."""
+
+    def __init__(self, mono, cost, *answers):
+        super().__init__(*answers)
+        self.mono, self.cost, self.timeouts = mono, cost, []
+
+    def __call__(self, method, url, form, timeout=None):
+        self.timeouts.append(timeout)
+        self.mono.now += self.cost
+        return super().__call__(method, url, form)
+
+
+def test_deadline_stops_the_climb(env):
+    mono = Mono()
+    h = Slow(mono, 5, CHALLENGE)
+    u = Fake(OK)
+    s = env({"httpx": h, "urllib": u}, monotonic=mono)
+    with pytest.raises(FetchFailed) as e:
+        s.fetch("https://a.test/", deadline=mono.now + 4)
+    assert e.value.kind == "deadline"
+    assert len(h.calls) == 1 and not u.calls  # no further rung starts once the deadline has passed
+
+
+def test_deadline_stops_transport_retries(env):
+    mono = Mono()
+    h = Slow(mono, 5, FetchTransportError("reset"))
+    s = env({"httpx": h}, monotonic=mono)
+    with pytest.raises(FetchFailed) as e:
+        s.fetch("https://a.test/", deadline=mono.now + 4)
+    assert e.value.kind == "deadline" and len(h.calls) == 1
+
+
+def test_deadline_stops_a_saved_rung_before_it_starts(env):
+    mono = Mono()
+    env.store.put("a.test", rung="httpx", won="2026-10-01")
+    h = Slow(mono, 0, OK)
+    with pytest.raises(FetchFailed) as e:
+        env({"httpx": h}, monotonic=mono).fetch("https://a.test/", deadline=mono.now - 1)
+    assert e.value.kind == "deadline" and not h.calls
+
+
+def test_deadline_clamps_the_in_flight_transport_timeout(env):
+    mono = Mono()
+    h = Slow(mono, 0, OK)
+    env({"httpx": h}, monotonic=mono).fetch("https://a.test/", deadline=mono.now + 7)
+    assert h.timeouts == [7]
+
+
+def test_no_deadline_leaves_transports_on_their_own_timeout(env):
+    h = Fake(OK)  # a 3-argument transport: no timeout is passed without a deadline
+    assert env({"httpx": h}).fetch("https://a.test/").rung == "httpx"
+
+
+def test_deadline_refuses_a_pacing_wait_that_would_cross_it(env):
+    mono = Mono()
+    env.store.put("a.test", rung="httpx", won="2026-10-01", gap_s=50.0)
+    h = Slow(mono, 0, OK)
+    s = env({"httpx": h}, monotonic=mono)
+    s.fetch("https://a.test/1", deadline=mono.now + 10)  # first call reserves the slot
+    with pytest.raises(FetchFailed) as e:
+        s.fetch("https://a.test/2", deadline=mono.now + 10)  # the 50s gap would cross the deadline
+    assert e.value.kind == "deadline" and len(h.calls) == 1 and s.test_clock.slept == []

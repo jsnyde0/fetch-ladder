@@ -29,6 +29,11 @@ def no_alpn_context() -> ssl.SSLContext:
     return ctx
 
 
+def _timeout(left: float | None, own: float) -> float:
+    """The transport's own timeout, clamped to the time left to a fetch deadline."""
+    return own if left is None else max(min(own, left), 0.001)
+
+
 def _headers(mapping) -> dict[str, str]:
     return {k.lower(): v for k, v in mapping.items()}
 
@@ -36,9 +41,9 @@ def _headers(mapping) -> dict[str, str]:
 def httpx_transport() -> Transport:
     client = httpx.Client(timeout=TIMEOUT_S, headers=HTTPX_HEADERS)
 
-    def send(method, url, form):
+    def send(method, url, form, timeout=None):
         try:
-            r = client.request(method, url, content=form, headers=FORM_HEADER if form is not None else None)
+            r = client.request(method, url, content=form, headers=FORM_HEADER if form is not None else None, timeout=_timeout(timeout, TIMEOUT_S))
         except httpx.TransportError as e:
             raise FetchTransportError(f"{type(e).__name__}: {e}") from e
         return Raw(r.status_code, _headers(r.headers), r.text)
@@ -58,11 +63,11 @@ def _decode(data: bytes, headers) -> str:
 def urllib_transport() -> Transport:
     opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=no_alpn_context()), _NoRedirect)
 
-    def send(method, url, form):
+    def send(method, url, form, timeout=None):
         headers = {"User-Agent": UA, **(FORM_HEADER if form is not None else {})}
         req = urllib.request.Request(url, data=form.encode() if form is not None else None, headers=headers, method=method)
         try:
-            with opener.open(req, timeout=TIMEOUT_S) as r:
+            with opener.open(req, timeout=_timeout(timeout, TIMEOUT_S)) as r:
                 return Raw(r.status, _headers(r.headers), _decode(r.read(), r.headers))
         except urllib.error.HTTPError as e:  # any non-2xx answer is an HTTP answer, not a transport error
             return Raw(e.code, _headers(e.headers), _decode(e.read(), e.headers))
@@ -77,10 +82,10 @@ def curl_cffi_transport(target: str) -> Transport:
 
     session = cffi.Session()
 
-    def send(method, url, form):
+    def send(method, url, form, timeout=None):
         try:
             r = session.request(
-                method, url, data=form, impersonate=target, allow_redirects=False, timeout=TIMEOUT_S,
+                method, url, data=form, impersonate=target, allow_redirects=False, timeout=_timeout(timeout, TIMEOUT_S),
                 headers=FORM_HEADER if form is not None else None,
             )  # fmt: skip
         except cffi.exceptions.RequestException as e:
@@ -102,13 +107,14 @@ def firecrawl_transport() -> Transport:
     key = _key("FIRECRAWL_API_KEY", "hosted:firecrawl")
     client = httpx.Client(timeout=TIMEOUT_S * 2)
 
-    def send(method, url, form):
+    def send(method, url, form, timeout=None):
         if form is not None:
             raise FetchFailed("hosted:firecrawl reads pages by GET only", "unavailable")
         try:
             r = client.post(
                 "https://api.firecrawl.dev/v1/scrape", headers={"Authorization": f"Bearer {key}"},
                 json={"url": url, "formats": ["html"], "maxAge": 0},  # maxAge 0: never served from its cache
+                timeout=_timeout(timeout, TIMEOUT_S * 2),
             )  # fmt: skip
         except httpx.TransportError as e:
             raise FetchTransportError(f"{type(e).__name__}: {e}") from e
@@ -130,13 +136,14 @@ def jina_transport() -> Transport:
     key = os.environ.get("JINA_API_KEY", "").strip()  # optional: keyless works at a lower rate limit
     client = httpx.Client(timeout=TIMEOUT_S * 2)
 
-    def send(method, url, form):
+    def send(method, url, form, timeout=None):
         if form is not None:
             raise FetchFailed("hosted:jina reads pages by GET only", "unavailable")
         try:
             r = client.get(
                 f"https://r.jina.ai/{url}",
                 headers={"Accept": "application/json", "X-No-Cache": "true", **({"Authorization": f"Bearer {key}"} if key else {})},
+                timeout=_timeout(timeout, TIMEOUT_S * 2),
             )
         except httpx.TransportError as e:
             raise FetchTransportError(f"{type(e).__name__}: {e}") from e

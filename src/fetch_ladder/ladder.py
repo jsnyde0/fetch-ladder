@@ -10,7 +10,7 @@ ledger), a target's HTTP 429 wait-out (then the host is blocked for the session,
 challenge pages as failures, vetting of every hop (scheme, reader/proxy shapes, private
 addresses), the hosted cap, readers stopped for the day on 402/429, and credential-shaped links
 kept off hosted readers. A transport is a callable `(method, url, form) -> Raw` that makes ONE
-request and does not follow redirects (a browser rung may, and reports Raw.final_url).
+request and does not follow redirects (a browser rung may, and reports Raw.final_url); it also takes `timeout=` when a fetch has a deadline.
 """
 
 import ipaddress
@@ -68,7 +68,7 @@ class FetchFailed(Exception):
     """The fetch got no usable page. `kind`: status, challenge, rate_limited, vetting, redirects,
     refused (hosted not allowed for this call or link), unavailable, reader (a hosted reader's own
     failure, or a reader hiding the target status), reader_stopped (402/429 from a reader: stopped
-    for the day), cap (hosted cap spent), exhausted (every rung failed). `status` is the target's
+    for the day), cap (hosted cap spent), exhausted (every rung failed), deadline (the caller's deadline passed). `status` is the target's
     HTTP status, if there was one."""
 
     def __init__(self, message: str, kind: str, status: int | None = None):
@@ -107,7 +107,7 @@ class Page:
     rung: str
 
 
-Transport = Callable[[str, str, str | None], Raw]
+Transport = Callable[..., Raw]  # (method, url, form, *, timeout=None); a deadline passes `timeout`
 Resolve = Callable[[str], list[str]]
 
 
@@ -188,11 +188,11 @@ class Session:
     store. `home`: the global home (store and day ledger); default FETCH_LADDER_HOME or
     ~/.fetch-ladder. `allow_hosted=False` keeps every call on local rungs. `transports` overrides
     rungs by name and `resolve` the address lookup (tests). `clock` is wall time: the ledger
-    shares it across processes."""
+    shares it across processes. `monotonic` is what a fetch `deadline` is measured on."""
 
     def __init__(
         self, *, allow_hosted=True, gap_s=GAP_S, cap=HOSTED_CAP, store: Path | None = None, home: Path | None = None,
-        transports=None, resolve: Resolve = resolve_host, sleep=time.sleep, clock=time.time,
+        transports=None, resolve: Resolve = resolve_host, sleep=time.sleep, clock=time.time, monotonic=time.monotonic,
     ):  # fmt: skip
         self.allow_hosted = allow_hosted
         self.gap_s = gap_s
@@ -207,6 +207,8 @@ class Session:
         self._resolve = resolve
         self._sleep = sleep
         self._clock = clock
+        self._monotonic = monotonic
+        self._deadline: float | None = None
         self._blocked: set[str] = set()
 
     @property
@@ -228,9 +230,18 @@ class Session:
             self._transports[rung] = transports.build(rung)  # raises RungUnavailable / FetchFailed
         return self._transports[rung]
 
-    def fetch(self, url: str, rung: str | None = None, form: str | None = None, note: Callable[[str], None] = lambda _: None) -> Page:
+    def fetch(self, url: str, rung: str | None = None, form: str | None = None, note: Callable[[str], None] = lambda _: None, deadline: float | None = None) -> Page:
         """GET `url` (POST `form`, a URL-encoded body, if given). With `rung`, through that rung
-        only, never writing the store; without, by site (see the module doc)."""
+        only, never writing the store; without, by site (see the module doc). `deadline` is an
+        absolute `monotonic()` timestamp: once it passes no rung, retry, or pacing wait starts
+        (FetchFailed, kind deadline), and each transport call is given the time left as its timeout."""
+        self._deadline = deadline
+        try:
+            return self._fetch_by(url, rung, form, note)
+        finally:
+            self._deadline = None
+
+    def _fetch_by(self, url: str, rung: str | None, form: str | None, note: Callable[[str], None]) -> Page:
         if rung is not None:
             return self._fetch(url, rung, form)
         entry = self.saved(_host(url))
@@ -255,6 +266,7 @@ class Session:
         for rung in CLIMB:
             if rung == skip:
                 continue
+            self._check_deadline(url)
             if rung.startswith("hosted:"):
                 reason = self._hosted_refusal(url) or (self.ledger.stopped(rung) and "stopped for the day")
                 if reason:
@@ -301,6 +313,7 @@ class Session:
 
     def _fetch_retrying(self, url: str, rung: str, form: str | None, note: Callable[[str], None]) -> Page:
         for attempt in range(TRANSPORT_RETRIES + 1):
+            self._check_deadline(url)
             try:
                 return self._fetch(url, rung, form)
             except FetchTransportError as e:
@@ -346,7 +359,7 @@ class Session:
             raise FetchFailed(f"{rung}: hosted cap of {self.cap} calls today is spent", "cap")
         self._pace(_host(url))
         try:
-            raw = transport("POST" if form is not None else "GET", url, form)
+            raw = self._call(transport, "POST" if form is not None else "GET", url, form)
         except FetchTransportError:
             self.ledger.refund_hosted(rung)  # no HTTP answer: the call did not spend the day's cap
             raise
@@ -373,11 +386,26 @@ class Session:
         entry = self.saved(host) or {}
         return max(self.gap_s, entry.get("gap_s", 0.0))
 
+    def _check_deadline(self, url: str, wait: float = 0.0) -> None:
+        if self._deadline is not None and self._monotonic() + wait >= self._deadline:
+            raise FetchFailed(f"{url}: fetch deadline passed", "deadline")
+
+    def _pause(self, url: str, seconds: float) -> None:
+        self._check_deadline(url, seconds)  # a wait that would cross the deadline is not started
+        self._sleep(seconds)
+
+    def _call(self, transport: Transport, method: str, url: str, form: str | None) -> Raw:
+        """One transport request, given the time left to the deadline as its timeout."""
+        if self._deadline is None:
+            return transport(method, url, form)
+        self._check_deadline(url)
+        return transport(method, url, form, timeout=self._deadline - self._monotonic())
+
     def _pace(self, host: str) -> None:
         now = self._clock()
         wait = self.ledger.reserve(host, self._gap(host), now) - now
         if wait > 0:
-            self._sleep(wait)
+            self._pause(host, wait)
 
     def _send(self, transport: Transport, method: str, url: str, form: str | None) -> Raw:
         host = _host(url)
@@ -385,12 +413,12 @@ class Session:
             raise FetchFailed(f"{host} rate limited this session (HTTP 429)", "rate_limited", 429)
         for attempt in range(RATE_LIMIT_RETRIES + 1):
             self._pace(host)
-            raw = transport(method, url, form)
+            raw = self._call(transport, method, url, form)
             if raw.status != 429:
                 return raw
             pause = _retry_after(raw)
             if attempt == RATE_LIMIT_RETRIES or pause > RETRY_AFTER_CAP_S:
                 break
-            self._sleep(pause)
+            self._pause(host, pause)
         self._blocked.add(host)
         raise FetchFailed(f"{host} rate limited this session (HTTP 429)", "rate_limited", 429)
