@@ -417,3 +417,41 @@ def test_jina_404_target_fails_loud_without_climbing(monkeypatch):
     with pytest.raises(FetchFailed):
         session(fs).fetch("https://a.test/", rung="hosted:jina")
     assert not fs["hosted:firecrawl"].calls
+
+
+# a dead network (ADR-008 D4): retried, then loud; never a climb to hosted readers or a spent cap slot
+LOCAL = ("httpx", "urllib", "curl_cffi:chrome", "curl_cffi:firefox", "curl_cffi:safari")
+
+
+def test_climb_dead_network_fails_loud_without_touching_hosted_rungs():
+    fs = {r: Fake(FetchTransportError("dns down")) for r in LOCAL}
+    fs.update({r: Fake(Raw(200, {}, "<p>x</p>", target_status=200)) for r in ("hosted:jina", "hosted:firecrawl")})
+    s = session(fs)
+    with pytest.raises(FetchFailed) as e:
+        s.climb("https://a.test/")
+    assert e.value.kind == "network" and "network" in str(e.value) and "dns down" in str(e.value)
+    assert all(len(fs[r].calls) == 3 for r in LOCAL)  # first try + 2 retries
+    assert not fs["hosted:jina"].calls and not fs["hosted:firecrawl"].calls
+    assert s.ledger.read()["hosted"] == {}
+
+
+def test_climb_one_blocked_local_rung_still_climbs_to_hosted():
+    fs = {r: Fake(FetchTransportError("down")) for r in LOCAL}
+    fs["httpx"] = Fake(Raw(403, {}, "no"))
+    fs["hosted:jina"] = Fake(Raw(200, {}, "<p>x</p>", target_status=200))
+    assert session(fs).climb("https://a.test/").rung == "hosted:jina"
+
+
+def test_hosted_request_that_never_sent_takes_no_cap_slot():
+    fs = {"hosted:jina": Fake(FetchTransportError("down"))}
+    s = session(fs)
+    with pytest.raises(FetchTransportError):
+        s.fetch("https://a.test/", rung="hosted:jina")
+    assert s.ledger.read()["hosted"] == {}
+
+
+def test_hosted_request_that_was_sent_takes_a_cap_slot():
+    fs = {"hosted:jina": Fake(Raw(200, {}, "<p>x</p>", target_status=200))}
+    s = session(fs)
+    s.fetch("https://a.test/", rung="hosted:jina")
+    assert s.ledger.read()["hosted"] == {"hosted:jina": 1}

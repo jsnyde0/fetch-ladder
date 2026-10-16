@@ -250,6 +250,7 @@ class Session:
         allow_hosted are skipped (said via `note`). A failure that is not block-shaped ends the
         climb. If every rung fails, FetchFailed (kind exhausted) names each."""
         tried: list[str] = []
+        local_transport_only = True  # every local rung that ran failed with no HTTP answer
         for rung in CLIMB:
             if rung == skip:
                 continue
@@ -258,6 +259,8 @@ class Session:
                 if reason:
                     note(f"skip {rung}: {reason}")
                     continue
+                if tried and local_transport_only:  # dead network: a hosted reader cannot help (ADR-008 D4)
+                    raise FetchFailed(f"{url}: network failure on every local rung: " + "; ".join(tried), "network")
             try:
                 page = self._fetch_retrying(url, rung, form, note)
             except RungUnavailable as e:
@@ -267,6 +270,8 @@ class Session:
                 if not (_block_shaped(e) or (isinstance(e, FetchFailed) and e.kind in ("reader", "reader_stopped"))):
                     raise
                 note(f"{rung} failed: {e}")
+                if not rung.startswith("hosted:") and not isinstance(e, FetchTransportError):
+                    local_transport_only = False
                 tried.append(f"{rung}: {e}")
                 continue
             self._save(_host(url), rung)
@@ -336,7 +341,11 @@ class Session:
         if not self.ledger.take_hosted(rung, self.cap):
             raise FetchFailed(f"{rung}: hosted cap of {self.cap} calls today is spent", "cap")
         self._pace(_host(url))
-        raw = transport("POST" if form is not None else "GET", url, form)
+        try:
+            raw = transport("POST" if form is not None else "GET", url, form)
+        except FetchTransportError:
+            self.ledger.refund_hosted(rung)  # no HTTP answer: the call did not spend the day's cap
+            raise
         if raw.status in (402, 429):
             self.ledger.stop(rung)
             raise FetchFailed(f"{rung}: reader answered HTTP {raw.status}; stopped for the day", "reader_stopped")

@@ -160,6 +160,17 @@ class Ledger:
 
         return _update(self.path, self._empty, change)
 
+    def refund_hosted(self, reader: str) -> None:
+        """Give back one slot taken by `take_hosted` for a call that never got an answer."""
+
+        def change(data):
+            if data["hosted"].get(reader, 0) > 0:
+                data["hosted"][reader] -= 1
+                if not data["hosted"][reader]:
+                    del data["hosted"][reader]
+
+        _update(self.path, self._empty, change)
+
     def stop(self, reader: str) -> None:
         def change(data):
             if reader not in data["stopped"]:
